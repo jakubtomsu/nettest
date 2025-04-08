@@ -16,3 +16,5 @@ In *exactly* one C/C++ file define `NETTEST_IMPLEMENTATION` before including:
 ## Demo
 
 Build with `x64 Native Tools Command Prompt for VS` using `cl nettest_demo.cpp`
+
+![img](nettest_demo_screenshot.png)
