@@ -27,9 +27,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    bool sender = argv[1][0] == 's';
+    int sender = argv[1][0] == 's';
 
-    nettest_init(false);
+    nettest_init(0);
 
     // nettest_set_param(NETTEST_PARAM_DROP_CHANCE, 0.1f);
     // nettest_set_param(NETTEST_PARAM_DELAY_MIN, 0.0f);
@@ -47,26 +47,26 @@ int main(int argc, char** argv) {
     local.sin_port = htons(sender ? SEND_PORT : RECV_PORT);
     local.sin_addr.s_addr = INADDR_ANY;
 
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if(bind(sock, (sockaddr*)&local, sizeof(local)) != 0) {
+    int sock = (int)socket(AF_INET, SOCK_DGRAM, 0);
+    if(bind(sock, (struct sockaddr*)&local, sizeof(local)) != 0) {
         printf("Failed to bind\n");
         return 1;
     }
 
-    sockaddr_in addr_dst;
+    struct sockaddr_in addr_dst;
     addr_dst.sin_family = AF_INET;
     addr_dst.sin_port = htons(sender ? RECV_PORT : SEND_PORT);
     inet_pton(AF_INET, IP_ADDRESS, &addr_dst.sin_addr.s_addr);
 
 
-    packet_t packet = {};
+    packet_t packet = {0};
     if(sender) {
         for(uint32_t i = 0;; i++) {
             packet.index = i;
             snprintf(packet.msg, sizeof(packet.msg), "Hello world %x", i);
 
             printf("Sending packet: %u: %s\n", i, packet.msg);
-            if(_sendto(sock, (const char*)&packet, sizeof(packet_t), 0, (const sockaddr*)&addr_dst, sizeof(sockaddr)) == -1) {
+            if(_sendto(sock, (const char*)&packet, sizeof(packet_t), 0, (const struct sockaddr*)&addr_dst, sizeof(struct sockaddr)) == -1) {
                 printf("sendto failed");
             }
 
@@ -74,20 +74,18 @@ int main(int argc, char** argv) {
         }
 
     } else {
-        uint32_t mod_bits;
+        uint32_t mod_bits = 0;
 
         while(1) {
             struct sockaddr_in from;
-            int from_size = sizeof(sockaddr_in);
+            int from_size = sizeof(struct sockaddr_in);
 
-            int len = recvfrom(sock, (char*)&packet, sizeof(packet_t), 0, (sockaddr*)&from, (socklen_t*)&from_size);
+            int len = recvfrom(sock, (char*)&packet, sizeof(packet_t), 0, (struct sockaddr*)&from, &from_size);
             if(len > 0) {
                 mod_bits ^= (uint32_t)1 << (uint32_t)(packet.index);
 
-                if (true) {
-                    for (uint32_t i = 0; i < 32; i++) {
-                        putchar((mod_bits & (uint32_t)(1 << i)) != 0 ? '*' : ' ');
-                    }
+                for (uint32_t i = 0; i < 32; i++) {
+                    putchar((mod_bits & (uint32_t)(1 << i)) != 0 ? '*' : ' ');
                 }
 
                 printf(" Recieved packet: %u: %s, size %i\n", packet.index, packet.msg, len);

@@ -30,14 +30,14 @@ typedef enum {
 // Initialize the internal state.
 // If sync is false, this spawns a background thread which is
 // going to periodically send packets which are ready.
-void nettest_init(bool sync);
+void nettest_init(int sync);
 
 // Call every few ms to dispatch packets which are ready.
 // WARNING: only call if you called `nettest_init` with sync=true!!!
-void nettest_update();
+void nettest_update(void);
 
 // Flush and shutdown all internal state
-void nettest_shutdown();
+void nettest_shutdown(void);
 
 // Set internal parameter
 void nettest_set_param(nettest_param_t param, float value);
@@ -51,7 +51,7 @@ int nettest_sendto(
     const void* dest_addr,
     size_t dest_addr_size);
 
-static int nettest_send(
+int nettest_send(
     int sockfd,
     const char* data,
     size_t data_len,
@@ -112,7 +112,7 @@ typedef struct {
 typedef struct {
     uint32_t rand_seed;
     uint64_t id_counter;
-    bool running;
+    int running;
 
     float params[NETTEST_PARAM_COUNT];
 
@@ -130,11 +130,12 @@ nettest_state_t _nettest;
 
 #ifdef _WIN32 // Windows
 DWORD WINAPI _nettest_win32_thread_func(LPVOID lp_param) {
+    (void)lp_param;
     while(_nettest.running) {
         // _nettest_log("NETTEST: thread update\n");
         nettest_update();
 
-        int sleep_ms = _nettest.params[NETTEST_PARAM_THREAD_SLEEP];
+        int sleep_ms = (int)_nettest.params[NETTEST_PARAM_THREAD_SLEEP];
         if(sleep_ms < 1) sleep_ms = 1;
         Sleep(sleep_ms);
     }
@@ -144,12 +145,12 @@ DWORD WINAPI _nettest_win32_thread_func(LPVOID lp_param) {
 
 
 
-static uint32_t _nettest_rand() {
+static uint32_t _nettest_rand(void) {
     _nettest.rand_seed = _nettest.rand_seed * 0x343fd + 0x269ec3;
     return (_nettest.rand_seed >> 16) & 32767;
 }
 
-static float _nettest_frand() {
+static float _nettest_frand(void) {
     return (float)_nettest_rand() / 32767.0f;
 }
 
@@ -165,16 +166,16 @@ static void _nettest_packet_sendto(nettest_packet_t packet) {
     sendto(
         packet.sockfd,
         (const char*)packet.data,
-        packet.data_len,
+        (int)packet.data_len,
         packet.flags,
-        (const sockaddr*)packet.dest_addr,
-        packet.dest_addr_size);
+        (const struct sockaddr*)packet.dest_addr,
+        (int)packet.dest_addr_size);
 }
 
 
-void nettest_init(bool sync) {
+void nettest_init(int sync) {
     _nettest.rand_seed = 0x012398;
-    _nettest.running = true;
+    _nettest.running = 1;
     QueryPerformanceFrequency(&_nettest.plat.timer_freq);
     QueryPerformanceCounter(&_nettest.plat.timer_prev);
     if(!sync) {
@@ -182,17 +183,17 @@ void nettest_init(bool sync) {
     }
 }
 
-void nettest_shutdown() {
-    _nettest.running = false;
+void nettest_shutdown(void) {
+    _nettest.running = 0;
     WaitForSingleObject(_nettest.plat.thread_handle, INFINITE);
     CloseHandle(_nettest.plat.thread_handle);
 }
 
-void nettest_update() {
+void nettest_update(void) {
     LARGE_INTEGER timer_curr;
     QueryPerformanceCounter(&timer_curr);
 
-    float delta = (double)(timer_curr.QuadPart - _nettest.plat.timer_prev.QuadPart) / (double)_nettest.plat.timer_freq.QuadPart;
+    float delta = (float)((double)(timer_curr.QuadPart - _nettest.plat.timer_prev.QuadPart) / (double)_nettest.plat.timer_freq.QuadPart);
 
     // _nettest_log("NETTEST: update delta: %f\n", delta);
 
@@ -237,10 +238,10 @@ int nettest_sendto(
     if (_nettest_frand() < _nettest.params[NETTEST_PARAM_DROP_CHANCE]) {
         // Return as if nothing happened.
         // _nettest_log("NETTEST: dropped packet %llu\n", id);
-        return data_len;
+        return (int)data_len;
     }
 
-    bool done = false;
+    int done = 0;
     while(!done) {
         for(int i = 0; i < NETTEST_REORDER_SLOTS; i++) {
             if(0 != _InterlockedCompareExchange16(&_nettest.slot[i], 1, 0)) {
@@ -268,7 +269,7 @@ int nettest_sendto(
 
             _InterlockedExchange16(&_nettest.slot[i], 2);
 
-            done = true;
+            done = 1;
             break;
         }
 
@@ -277,7 +278,7 @@ int nettest_sendto(
         }
     }
 
-    return data_len;
+    return (int)data_len;
 }
 
 
