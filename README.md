@@ -1,4 +1,5 @@
 # NetTest
+A small layer on top of Berkley sockets to simulate packet loss, delay, reodering and duplication to debug custom networking protocols.
 
 Currently only supports Windows
 
