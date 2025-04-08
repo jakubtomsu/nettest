@@ -1,6 +1,11 @@
 #ifndef NETTEST_H_INCLUDED
 #define NETTEST_H_INCLUDED
 
+// Simple printf logging for internal debugging
+#ifndef NETTEST_LOG
+#define NETTEST_LOG 0
+#endif
+
 #include <stdint.h>
 
 typedef uint8_t nettest_param_t;
@@ -11,6 +16,7 @@ typedef enum {
     // Random delay in seconds
     NETTEST_PARAM_DELAY_MIN,
     NETTEST_PARAM_DELAY_MAX,
+    // Chance for the packet to be sent twice, in range 0..1
     NETTEST_PARAM_DUPLICATE_CHANCE,
 
     // Internal
@@ -21,10 +27,13 @@ typedef enum {
     NETTEST_PARAM_COUNT,
 } _nettest_param_t;
 
-// Initialize the internal state
+// Initialize the internal state.
+// If sync is false, this spawns a background thread which is
+// going to periodically send packets which are ready.
 void nettest_init(bool sync);
 
-// Call every few ms, only if working in sync mode!
+// Call every few ms to dispatch packets which are ready.
+// WARNING: only call if you called `nettest_init` with sync=true!!!
 void nettest_update();
 
 // Flush and shutdown all internal state
@@ -34,20 +43,31 @@ void nettest_shutdown();
 void nettest_set_param(nettest_param_t param, float value);
 float nettest_get_param(nettest_param_t param);
 
-// BSD sockets' `sendto` alternative
 int nettest_sendto(
     int sockfd,
-    const void* data,
+    const char* data,
     size_t data_len,
     int flags,
     const void* dest_addr,
     size_t dest_addr_size);
+
+static int nettest_send(
+    int sockfd,
+    const char* data,
+    size_t data_len,
+    int flags) {
+    return nettest_sendto(sockfd, data, data_len, flags, NULL, 0);
+}
 
 #endif // NETTEST_H_INCLUDED
 
 
 
 #ifdef NETTEST_IMPLEMENTATION
+
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
 
 #ifdef _WIN32
 #undef UNICODE
@@ -57,20 +77,29 @@ int nettest_sendto(
 #include <ws2tcpip.h>
 #pragma comment(lib, "Ws2_32.lib")
 #else
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <unistd.h>
-#include <string.h>
+#error "Currently only Windows is supported"
 #endif
 
-#include <assert.h>
-#include <stdlib.h>
-#include <string.h>
+#if NETTEST_LOG
+#define _nettest_log(fmt, ...) printf(fmt, __VA_ARGS__)
+#else
+#define _nettest_log(fmt, ...)
+#endif
+
+
+#ifdef _WIN32
+typedef struct {
+    HANDLE thread_handle;
+    LARGE_INTEGER timer_freq;
+    LARGE_INTEGER timer_prev;
+} nettest_plat_state_t;
+#endif
+
 
 #define NETTEST_REORDER_SLOTS 512
 
 typedef struct {
+    // ID for debugging purposes.
     uint64_t id;
     int sockfd;
     void* data;
@@ -81,23 +110,39 @@ typedef struct {
 } nettest_packet_t;
 
 typedef struct {
-    // Note: slots are accessed from multiple threads, have to use atomics and coherent reads/writes.
-    volatile int16_t slot[NETTEST_REORDER_SLOTS];
-    float time_left[NETTEST_REORDER_SLOTS];
-    nettest_packet_t packets[NETTEST_REORDER_SLOTS];
-    float params[NETTEST_PARAM_COUNT];
     uint32_t rand_seed;
     uint64_t id_counter;
     bool running;
 
-#if _WIN32
-    HANDLE thread_handle;
-    LARGE_INTEGER timer_freq;
-    LARGE_INTEGER timer_prev;
-#endif
+    float params[NETTEST_PARAM_COUNT];
+
+    // Note: slots are accessed from multiple threads, have to use atomics and coherent reads/writes.
+    volatile int16_t slot[NETTEST_REORDER_SLOTS];
+    float time_left[NETTEST_REORDER_SLOTS];
+    nettest_packet_t packets[NETTEST_REORDER_SLOTS];
+
+    nettest_plat_state_t plat;
 } nettest_state_t;
 
 nettest_state_t _nettest;
+
+
+
+#ifdef _WIN32 // Windows
+DWORD WINAPI _nettest_win32_thread_func(LPVOID lp_param) {
+    while(_nettest.running) {
+        // _nettest_log("NETTEST: thread update\n");
+        nettest_update();
+
+        int sleep_ms = _nettest.params[NETTEST_PARAM_THREAD_SLEEP];
+        if(sleep_ms < 1) sleep_ms = 1;
+        Sleep(sleep_ms);
+    }
+    return 0;
+}
+#endif
+
+
 
 static uint32_t _nettest_rand() {
     _nettest.rand_seed = _nettest.rand_seed * 0x343fd + 0x269ec3;
@@ -126,58 +171,45 @@ static void _nettest_packet_sendto(nettest_packet_t packet) {
         packet.dest_addr_size);
 }
 
-#if _WIN32
-DWORD WINAPI _nettest_win32_thread_func(LPVOID lp_param) {
-    while(_nettest.running) {
-        // printf("NETTEST: thread update\n");
-        nettest_update();
-
-        int sleep_ms = _nettest.params[NETTEST_PARAM_THREAD_SLEEP];
-        if(sleep_ms < 1) sleep_ms = 1;
-        Sleep(sleep_ms);
-    }
-    return 0;
-}
-#endif
 
 void nettest_init(bool sync) {
-    QueryPerformanceFrequency(&_nettest.timer_freq);
-    QueryPerformanceCounter(&_nettest.timer_prev);
-
     _nettest.rand_seed = 0x012398;
     _nettest.running = true;
-
+    QueryPerformanceFrequency(&_nettest.plat.timer_freq);
+    QueryPerformanceCounter(&_nettest.plat.timer_prev);
     if(!sync) {
-        _nettest.thread_handle = CreateThread(NULL, 0, _nettest_win32_thread_func, 0, 0, 0);
+        _nettest.plat.thread_handle = CreateThread(NULL, 0, _nettest_win32_thread_func, 0, 0, 0);
     }
 }
 
 void nettest_shutdown() {
-    WaitForSingleObject(_nettest.thread_handle, INFINITE);
+    _nettest.running = false;
+    WaitForSingleObject(_nettest.plat.thread_handle, INFINITE);
+    CloseHandle(_nettest.plat.thread_handle);
 }
 
 void nettest_update() {
     LARGE_INTEGER timer_curr;
     QueryPerformanceCounter(&timer_curr);
 
-    float delta = (double)(timer_curr.QuadPart - _nettest.timer_prev.QuadPart) / (double)_nettest.timer_freq.QuadPart;
+    float delta = (double)(timer_curr.QuadPart - _nettest.plat.timer_prev.QuadPart) / (double)_nettest.plat.timer_freq.QuadPart;
 
-    // printf("NETTEST: update delta: %f\n", delta);
+    // _nettest_log("NETTEST: update delta: %f\n", delta);
 
     for(int i = 0; i < NETTEST_REORDER_SLOTS; i++) {
         if(2 != _InterlockedCompareExchange16(&_nettest.slot[i], 2, 2)) {
             continue;
         }
 
-        // printf("NETTEST: waiting packet %llu\n", _nettest.packets[i].id);
+        // _nettest_log("NETTEST: waiting packet %llu\n", _nettest.packets[i].id);
 
         _nettest.time_left[i] -= delta;
         if(_nettest.time_left[i] <= 0) {
-            printf("NETTEST: sending packet %llu\n", _nettest.packets[i].id);
+            _nettest_log("NETTEST: sending packet %llu\n", _nettest.packets[i].id);
             _nettest_packet_sendto(_nettest.packets[i]);
 
             if(_nettest_frand() < _nettest.params[NETTEST_PARAM_DUPLICATE_CHANCE]) {
-                printf("NETTEST: duplicating packet %llu\n", _nettest.packets[i].id);
+                _nettest_log("NETTEST: duplicating packet %llu\n", _nettest.packets[i].id);
                 _nettest_packet_sendto(_nettest.packets[i]);
             }
 
@@ -188,12 +220,12 @@ void nettest_update() {
         }
     }
 
-    _nettest.timer_prev = timer_curr;
+    _nettest.plat.timer_prev = timer_curr;
 }
 
 int nettest_sendto(
     int sockfd,
-    const void* data,
+    const char* data,
     size_t data_len,
     int flags,
     const void* dest_addr,
@@ -204,7 +236,7 @@ int nettest_sendto(
 
     if (_nettest_frand() < _nettest.params[NETTEST_PARAM_DROP_CHANCE]) {
         // Return as if nothing happened.
-        printf("NETTEST: dropped packet %llu\n", id);
+        // _nettest_log("NETTEST: dropped packet %llu\n", id);
         return data_len;
     }
 
@@ -219,7 +251,7 @@ int nettest_sendto(
                               _nettest_frand() *
                                   (_nettest.params[NETTEST_PARAM_DELAY_MAX] - _nettest.params[NETTEST_PARAM_DELAY_MIN]);
 
-            // printf("NETTEST: storing packet %llu\n", id);
+            // _nettest_log("NETTEST: storing packet %llu\n", id);
 
             void* buf = malloc(data_len);
             memcpy(buf, data, data_len);
