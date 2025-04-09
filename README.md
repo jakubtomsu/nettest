@@ -11,7 +11,11 @@ In *exactly* one C/C++ file define `NETTEST_IMPLEMENTATION` before including:
 #define NETTEST_IMPLEMENTATION 1
 #include "nettest.h"
 
-// rest of your code...
+void main() {
+    nettest_init(0); // init in async/threaded mode
+    nettest_sendto(...); // instead of regular sendto
+    nettest_shutdown();
+}
 ```
 
 ## Demo
